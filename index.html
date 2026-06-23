@@ -25,85 +25,84 @@ const auth = getAuth(app);
 
 const MONTHS = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const DAYS_PT = ['domingo','segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado'];
-const STATUS_OPTIONS = ['','OK','Falta','Formação','Back Up','Backup Externo','Backup Interno'];
-const ALL_FIELDS = ['Entregues','Não entregues','CA','CCU','Fora de rota','Cliente não aceitou','MD','IA (Imp. Acesso)','Reagendado','Anulados','Entregas DHL','Saldo','Tentativas','Devoluções'];
+const STATUS_OPTIONS = ['','OK','Falta','Formação','Back Up','Backup Externo','Backup Interno','Folga'];
+const ALL_FIELDS = ['Entregas','Entregues','Incidências','Não Visitados','Recolhas','Não entregues','CA','CCU','Fora de rota','Cliente não aceitou','MD','IA (Imp. Acesso)','Reagendado','Anulados','Saldo','Tentativas','Devoluções'];
+
+// Fields that should NOT count toward EDR total (only "Entregues" is numerator, "Entregas" is base)
+const EDR_EXCLUDE = ['Entregas']; // excluded from total sum, used as denominator base separately
 
 let currentUser = null;
 let state = {
-  page: 'dashboard', month: new Date().getMonth(), year: new Date().getFullYear(),
-  selectedClient: null, dashboardClient: 'all', presencaClient: 'all',
-  clients: [], motoristas: [], presencas: {}, entregas: {}, loaded: false,
-  repStartDate: '', repEndDate: ''
+  page:'dashboard', month:new Date().getMonth(), year:new Date().getFullYear(),
+  selectedClient:null, dashboardClient:'all', presencaClients:[],
+  clients:[], motoristas:[], presencas:{}, entregas:{}, rowColors:{}, loaded:false
 };
 let unsubListeners = [];
 
-// ── AUDIT LOG ──────────────────────────────────────────
+// ── AUDIT ──────────────────────────────────────────────
 async function logAction(action, details) {
-  try {
-    await addDoc(collection(db, 'audit_log'), {
-      user: currentUser?.email || 'unknown',
-      action, details,
-      ts: new Date().toISOString()
-    });
-  } catch(e) { console.error('log error', e); }
+  try { await addDoc(collection(db,'audit_log'),{user:currentUser?.email||'unknown',action,details,ts:new Date().toISOString()}); } catch(e){}
 }
 
-// ── FIREBASE HELPERS ───────────────────────────────────
-async function fbSet(path, data) { try { await setDoc(doc(db, path), data, {merge:true}); } catch(e){console.error(e);} }
-async function fbGet(path) { try { const d=await getDoc(doc(db,path)); return d.exists()?d.data():null; } catch(e){return null;} }
-function fbListen(path, cb) { return onSnapshot(doc(db,path), s=>{ if(s.exists()) cb(s.data()); }); }
+// ── FIREBASE ───────────────────────────────────────────
+async function fbSet(path,data){try{await setDoc(doc(db,path),data,{merge:true});}catch(e){console.error(e);}}
+async function fbGet(path){try{const d=await getDoc(doc(db,path));return d.exists()?d.data():null;}catch(e){return null;}}
+function fbListen(path,cb){return onSnapshot(doc(db,path),s=>{if(s.exists())cb(s.data());});}
 
-async function loadAllData() {
-  const cfg = await fbGet('config/main');
-  if(cfg) {
-    state.clients = cfg.clients||[];
-    state.motoristas = cfg.motoristas||[];
-    if(state.clients.length && !state.selectedClient) state.selectedClient = state.clients[0].id;
+async function loadAllData(){
+  const cfg=await fbGet('config/main');
+  if(cfg){
+    state.clients=cfg.clients||[];
+    state.motoristas=(cfg.motoristas||[]).map(m=>({active:true,entryDate:'',exitDate:'',...m}));
+    if(state.clients.length&&!state.selectedClient) state.selectedClient=state.clients[0].id;
   } else {
-    state.clients = [
-      {id:1,name:'Telheiras',location:'Lisboa',fields:['Entregues','Não entregues','CA','CCU','Fora de rota','Cliente não aceitou','MD','IA (Imp. Acesso)','Reagendado','Anulados']},
-      {id:2,name:'Vila Real',location:'Vila Real',fields:['Entregas DHL','Entregues','Saldo']}
+    state.clients=[
+      {id:1,name:'Telheiras',location:'Lisboa',color:'#e3f2fd',fields:['Entregas','Entregues','Incidências','Não Visitados','Recolhas','CA','CCU','Não entregues']},
+      {id:2,name:'Vila Real',location:'Vila Real',color:'#f3e5f5',fields:['Entregas','Entregues','Saldo']}
     ];
-    state.motoristas = [
+    state.motoristas=[
       {id:1,name:'Rodrigo',client:1,contact:'',active:true,entryDate:'',exitDate:''},
       {id:2,name:'João Silva',client:1,contact:'',active:true,entryDate:'',exitDate:''},
       {id:3,name:'Carlos Mendes',client:2,contact:'',active:true,entryDate:'',exitDate:''}
     ];
     await saveConfig();
   }
-  // Ensure motoristas have new fields
-  state.motoristas = state.motoristas.map(m=>({active:true,entryDate:'',exitDate:'',...m}));
   await loadMonthData();
-  state.loaded = true;
+  // load row colors
+  const rc=await fbGet(`rowcolors/${monthKey()}`);
+  if(rc) state.rowColors={...state.rowColors,...rc};
+  state.loaded=true;
   showPage(state.page);
   setupListeners();
 }
 
-function monthKey() { return `${state.year}-${String(state.month+1).padStart(2,'0')}`; }
+function monthKey(){return `${state.year}-${String(state.month+1).padStart(2,'0')}`;}
 
-async function loadMonthData() {
+async function loadMonthData(){
   const mk=monthKey();
-  const p=await fbGet(`presencas/${mk}`); if(p) state.presencas={...state.presencas,...p};
-  const e=await fbGet(`entregas/${mk}`); if(e) state.entregas={...state.entregas,...e};
+  const p=await fbGet(`presencas/${mk}`);if(p)state.presencas={...state.presencas,...p};
+  const e=await fbGet(`entregas/${mk}`);if(e)state.entregas={...state.entregas,...e};
 }
 
-function setupListeners() {
-  unsubListeners.forEach(u=>u()); unsubListeners=[];
+function setupListeners(){
+  unsubListeners.forEach(u=>u());unsubListeners=[];
   const mk=monthKey();
   unsubListeners.push(
-    fbListen(`presencas/${mk}`, d=>{state.presencas={...state.presencas,...d}; if(state.page==='presencas')renderPresencas(); if(state.page==='dashboard')renderDashboard();}),
-    fbListen(`entregas/${mk}`, d=>{state.entregas={...state.entregas,...d}; if(state.page==='entregas')renderEntregas(); if(state.page==='dashboard')renderDashboard();}),
-    fbListen('config/main', d=>{
-      if(d.clients) state.clients=d.clients;
-      if(d.motoristas) state.motoristas=d.motoristas.map(m=>({active:true,entryDate:'',exitDate:'',...m}));
-      if(['clientes','motoristas','dashboard'].includes(state.page)) showPage(state.page);
+    fbListen(`presencas/${mk}`,d=>{state.presencas={...state.presencas,...d};if(state.page==='presencas')renderPresencas();if(state.page==='dashboard')renderDashboard();}),
+    fbListen(`entregas/${mk}`,d=>{state.entregas={...state.entregas,...d};if(state.page==='entregas')renderEntregas();if(state.page==='dashboard')renderDashboard();}),
+    fbListen(`rowcolors/${mk}`,d=>{state.rowColors={...state.rowColors,...d};if(state.page==='presencas')renderPresencas();}),
+    fbListen('config/main',d=>{
+      if(d.clients)state.clients=d.clients;
+      if(d.motoristas)state.motoristas=d.motoristas.map(m=>({active:true,entryDate:'',exitDate:'',...m}));
+      if(['clientes','motoristas','dashboard'].includes(state.page))showPage(state.page);
     })
   );
 }
 
-async function saveConfig() { await fbSet('config/main',{clients:state.clients,motoristas:state.motoristas}); }
-async function savePresencas() { await fbSet(`presencas/${monthKey()}`,state.presencas); }
-async function saveEntregas() { await fbSet(`entregas/${monthKey()}`,state.entregas); }
+async function saveConfig(){await fbSet('config/main',{clients:state.clients,motoristas:state.motoristas});}
+async function savePresencas(){await fbSet(`presencas/${monthKey()}`,state.presencas);}
+async function saveEntregas(){await fbSet(`entregas/${monthKey()}`,state.entregas);}
+async function saveRowColors(){await fbSet(`rowcolors/${monthKey()}`,state.rowColors);}
 
 // ── HELPERS ────────────────────────────────────────────
 function daysInMonth(y,m){return new Date(y,m+1,0).getDate();}
@@ -111,21 +110,56 @@ function getDow(y,m,d){return new Date(y,m,d).getDay();}
 function nextId(arr){return arr.length?Math.max(...arr.map(x=>x.id))+1:1;}
 function encodeF(f){return f.replace(/[^a-zA-Z0-9]/g,'_');}
 function getPresence(y,m,d,mid){return state.presencas[`${y}-${m}-${d}-${mid}`]||'';}
-function setPresence(y,m,d,mid,v){state.presencas[`${y}-${m}-${d}-${mid}`]=v; savePresencas();}
+function setPresence(y,m,d,mid,v){state.presencas[`${y}-${m}-${d}-${mid}`]=v;savePresencas();}
 function getEntrega(cid,y,m,d,f){return Number(state.entregas[`${cid}-${y}-${m}-${d}-${encodeF(f)}`])||0;}
-function setEntrega(cid,y,m,d,f,v){state.entregas[`${cid}-${y}-${m}-${d}-${encodeF(f)}`]=Number(v)||0; saveEntregas();}
+function setEntrega(cid,y,m,d,f,v){state.entregas[`${cid}-${y}-${m}-${d}-${encodeF(f)}`]=Number(v)||0;saveEntregas();}
+function getRowColor(y,m,d){return state.rowColors[`rc-${y}-${m}-${d}`]||'';}
+function setRowColor(y,m,d,color){state.rowColors[`rc-${y}-${m}-${d}`]=color;saveRowColors();}
+
 function edrClass(v){if(v===null||v===undefined)return '';return v>=95?'edr-high':v>=80?'edr-mid':'edr-low';}
+
 function statusClass(v){
-  if(v==='OK')return 'status-ok'; if(v==='Falta')return 'status-falta';
-  if(v==='Formação')return 'status-formacao'; if(v==='Back Up')return 'status-backup';
-  if(v==='Backup Externo')return 'status-bext'; if(v==='Backup Interno')return 'status-bint';
-  return 'status-empty';
+  const map={'OK':'status-ok','Falta':'status-falta','Formação':'status-formacao','Back Up':'status-backup',
+    'Backup Externo':'status-bext','Backup Interno':'status-bint','Folga':'status-folga'};
+  return map[v]||'status-empty';
 }
-function fmtDate(iso){if(!iso)return '—'; const d=new Date(iso); return d.toLocaleDateString('pt-PT');}
+
+function fmtDate(iso){if(!iso)return '—';return new Date(iso).toLocaleDateString('pt-PT');}
+
+// EDR calc: Entregues / Entregas * 100 (if both fields exist), else Entregues / total-of-non-Entregas
+function calcRowEDR(client, vals){
+  const hasEntregas = client.fields.includes('Entregas');
+  const hasEntregues = client.fields.includes('Entregues');
+  if(hasEntregas && hasEntregues){
+    const base = vals['Entregas']||0;
+    const done = vals['Entregues']||0;
+    return base>0 ? Math.round((done/base)*100) : null;
+  }
+  // fallback: entregues / sum of all
+  const total = client.fields.reduce((s,f)=>s+(vals[f]||0),0);
+  const done = vals[client.fields[0]]||0;
+  return total>0 ? Math.round((done/total)*100) : null;
+}
+
+function calcTotalEDR(client, totals){
+  const hasEntregas = client.fields.includes('Entregas');
+  const hasEntregues = client.fields.includes('Entregues');
+  if(hasEntregas && hasEntregues){
+    const base=totals['Entregas']||0, done=totals['Entregues']||0;
+    return base>0?Math.round((done/base)*100):null;
+  }
+  const total=client.fields.reduce((s,f)=>s+(totals[f]||0),0);
+  const done=totals[client.fields[0]]||0;
+  return total>0?Math.round((done/total)*100):null;
+}
+
 function changeMonth(d){
   state.month+=d;
-  if(state.month<0){state.month=11;state.year--;} if(state.month>11){state.month=0;state.year++;}
-  loadMonthData().then(()=>{setupListeners();showPage(state.page);});
+  if(state.month<0){state.month=11;state.year--;}if(state.month>11){state.month=0;state.year++;}
+  loadMonthData().then(async()=>{
+    const rc=await fbGet(`rowcolors/${monthKey()}`);if(rc)state.rowColors={...state.rowColors,...rc};
+    setupListeners();showPage(state.page);
+  });
 }
 function monthNav(){
   return `<div class="month-nav">
@@ -136,7 +170,7 @@ function monthNav(){
 }
 
 // ── ROUTER ─────────────────────────────────────────────
-window._showPage = function(page){
+window._showPage=function(page){
   state.page=page;
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.getAttribute('onclick')?.includes(`'${page}'`)));
   const titles={dashboard:'Dashboard',presencas:'Presenças',entregas:'Entregas Diárias',clientes:'Clientes',motoristas:'Motoristas',relatorios:'Relatórios',historico:'Histórico de Edições'};
@@ -145,18 +179,23 @@ window._showPage = function(page){
   ({dashboard:renderDashboard,presencas:renderPresencas,entregas:renderEntregas,clientes:renderClientes,motoristas:renderMotoristas,relatorios:renderRelatorios,historico:renderHistorico})[page]?.();
 };
 function showPage(p){window._showPage(p);}
-window._cm = changeMonth;
+window._cm=changeMonth;
 
 // ── DASHBOARD ──────────────────────────────────────────
 function renderDashboard(){
   const y=state.year,m=state.month,days=daysInMonth(y,m),today=new Date().getDate();
   const filterCid=state.dashboardClient==='all'?null:Number(state.dashboardClient);
   const clients=filterCid?state.clients.filter(c=>c.id===filterCid):state.clients;
-  let totalEnt=0,totalNao=0;
-  clients.forEach(c=>{for(let d=1;d<=days;d++){totalEnt+=getEntrega(c.id,y,m,d,c.fields[0]);if(c.fields[1])totalNao+=getEntrega(c.id,y,m,d,c.fields[1]);}});
-  const totalG=totalEnt+totalNao,edrG=totalG>0?Math.round((totalEnt/totalG)*100):0;
-  const motsFilt=filterCid?state.motoristas.filter(mo=>mo.client===filterCid&&mo.active!==false):state.motoristas.filter(mo=>mo.active!==false);
-  let faltasHoje=0; motsFilt.forEach(mo=>{if(getPresence(y,m,today,mo.id)==='Falta')faltasHoje++;});
+  let totalEnt=0,totalBase=0;
+  clients.forEach(c=>{
+    for(let d=1;d<=days;d++){
+      totalEnt+=getEntrega(c.id,y,m,d,c.fields.includes('Entregues')?'Entregues':c.fields[0]);
+      totalBase+=getEntrega(c.id,y,m,d,c.fields.includes('Entregas')?'Entregas':c.fields[0]);
+    }
+  });
+  const edrG=totalBase>0?Math.round((totalEnt/totalBase)*100):0;
+  const motsFilt=(filterCid?state.motoristas.filter(mo=>mo.client===filterCid):state.motoristas).filter(mo=>mo.active!==false);
+  let faltasHoje=0;motsFilt.forEach(mo=>{if(getPresence(y,m,today,mo.id)==='Falta')faltasHoje++;});
 
   document.getElementById('topbar-actions').innerHTML=`${monthNav()}
     <select onchange="window._dashFilter(this.value)" style="padding:6px 10px;border:1px solid #dadce0;border-radius:8px;font-size:13px">
@@ -167,7 +206,7 @@ function renderDashboard(){
   document.getElementById('content').innerHTML=`
     <div class="stats-grid">
       <div class="stat-card blue"><div class="label">Total Entregues</div><div class="value">${totalEnt.toLocaleString()}</div></div>
-      <div class="stat-card red"><div class="label">Não Entregues</div><div class="value">${totalNao.toLocaleString()}</div></div>
+      <div class="stat-card blue"><div class="label">Total Entregas</div><div class="value">${totalBase.toLocaleString()}</div></div>
       <div class="stat-card green"><div class="label">EDR Geral</div><div class="value">${edrG}%</div></div>
       <div class="stat-card orange"><div class="label">Faltas Hoje</div><div class="value">${faltasHoje}</div></div>
       <div class="stat-card blue"><div class="label">Clientes</div><div class="value">${clients.length}</div></div>
@@ -176,14 +215,18 @@ function renderDashboard(){
     <div class="card">
       <div class="card-header"><span class="card-title">Resumo por Cliente — ${MONTHS[m]} ${y}</span></div>
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Cliente</th><th>Entregues</th><th>Não Entregues</th><th>Total</th><th>EDR%</th><th>Motoristas</th></tr></thead>
+        <thead><tr><th>Cliente</th><th>Entregas</th><th>Entregues</th><th>EDR%</th><th>Motoristas</th></tr></thead>
         <tbody>${clients.map(c=>{
-          let ent=0,nao=0;
-          for(let d=1;d<=days;d++){ent+=getEntrega(c.id,y,m,d,c.fields[0]);if(c.fields[1])nao+=getEntrega(c.id,y,m,d,c.fields[1]);}
-          const tot=ent+nao,edr=tot>0?Math.round((ent/tot)*100):null;
+          let base=0,done=0;
+          for(let d=1;d<=days;d++){
+            base+=getEntrega(c.id,y,m,d,c.fields.includes('Entregas')?'Entregas':c.fields[0]);
+            done+=getEntrega(c.id,y,m,d,c.fields.includes('Entregues')?'Entregues':c.fields[0]);
+          }
+          const edr=base>0?Math.round((done/base)*100):null;
           const mots=state.motoristas.filter(mo=>mo.client===c.id&&mo.active!==false).map(mo=>mo.name).join(', ');
-          return `<tr><td><strong>${c.name}</strong><br><small style="color:#5f6368">${c.location}</small></td>
-            <td>${ent.toLocaleString()}</td><td>${nao.toLocaleString()}</td><td>${tot.toLocaleString()}</td>
+          const dot=c.color?`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c.color};margin-right:6px"></span>`:'';
+          return `<tr><td>${dot}<strong>${c.name}</strong><br><small style="color:#5f6368">${c.location}</small></td>
+            <td>${base.toLocaleString()}</td><td>${done.toLocaleString()}</td>
             <td class="edr-cell ${edrClass(edr)}">${edr!==null?edr+'%':'—'}</td><td>${mots||'—'}</td></tr>`;
         }).join('')}</tbody>
       </table></div>
@@ -193,7 +236,7 @@ function renderDashboard(){
       <div style="display:flex;gap:12px;flex-wrap:wrap">
         <button class="btn btn-primary" onclick="window._showPage('presencas')">✅ Registar Presença</button>
         <button class="btn btn-primary" onclick="window._showPage('entregas')">📦 Lançar Entregas</button>
-        <button class="btn btn-outline" onclick="window._showPage('relatorios')">📄 Ver Relatórios</button>
+        <button class="btn btn-outline" onclick="window._showPage('relatorios')">📄 Relatórios</button>
         <button class="btn btn-outline" onclick="window._showPage('historico')">🕓 Histórico</button>
       </div>
     </div>`;
@@ -203,40 +246,64 @@ window._dashFilter=v=>{state.dashboardClient=v;renderDashboard();};
 // ── PRESENÇAS ──────────────────────────────────────────
 function renderPresencas(){
   const y=state.year,m=state.month,days=daysInMonth(y,m);
-  const filterCid=state.presencaClient==='all'?null:Number(state.presencaClient);
-  const mots=filterCid?state.motoristas.filter(mo=>mo.client===filterCid&&mo.active!==false):state.motoristas.filter(mo=>mo.active!==false);
+  const filterCids=state.presencaClients; // array of ids, empty = all
+  let mots=state.motoristas.filter(mo=>mo.active!==false);
+  if(filterCids.length>0) mots=mots.filter(mo=>filterCids.includes(mo.client));
 
   document.getElementById('topbar-actions').innerHTML=`${monthNav()}
-    <select onchange="window._presFilter(this.value)" style="padding:6px 10px;border:1px solid #dadce0;border-radius:8px;font-size:13px">
-      <option value="all" ${state.presencaClient==='all'?'selected':''}>Todos</option>
-      ${state.clients.map(c=>`<option value="${c.id}" ${state.presencaClient==c.id?'selected':''}>${c.name}</option>`).join('')}
-    </select>
     <button class="btn btn-outline btn-sm" onclick="window._exportPresExcel()">⬇ Excel</button>
     <button class="btn btn-outline btn-sm" onclick="window._exportPresPDF()">🖨️ PDF</button>`;
 
-  if(!mots.length){document.getElementById('content').innerHTML='<div class="card" style="padding:40px;text-align:center;color:#666">Nenhum motorista ativo para este cliente.</div>';return;}
+  // Multi-client filter checkboxes
+  let filterBar=`<div class="card" style="padding:12px 16px;margin-bottom:16px">
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:600;color:#5f6368">Filtrar clientes:</span>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+        <input type="checkbox" ${filterCids.length===0?'checked':''} onchange="window._presFilterAll(this)"> Todos
+      </label>
+      ${state.clients.map(c=>`
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" value="${c.id}" ${filterCids.includes(c.id)?'checked':''} onchange="window._presFilterToggle(${c.id},this)">
+          <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c.color||'#ccc'}"></span> ${c.name}
+        </label>`).join('')}
+    </div>
+  </div>`;
 
-  let html=`<div class="card">
+  if(!mots.length){document.getElementById('content').innerHTML=filterBar+'<div class="card" style="padding:40px;text-align:center;color:#666">Nenhum motorista ativo para os clientes selecionados.</div>';return;}
+
+  let html=filterBar+`<div class="card">
     <div class="card-header">
       <span class="card-title">Presenças — ${MONTHS[m]} ${y}</span>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px">
-        <span class="leg-ok">✅ OK</span><span class="leg-falta">❌ Falta</span>
-        <span class="leg-form">📘 Formação</span><span class="leg-back">🔄 Back Up</span>
-        <span class="leg-bext">🟣 B.Externo</span><span class="leg-bint">🟠 B.Interno</span>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px">
+        <span class="leg leg-ok">✅ OK</span><span class="leg leg-falta">❌ Falta</span>
+        <span class="leg leg-form">📘 Formação</span><span class="leg leg-back">🔄 Back Up</span>
+        <span class="leg leg-bext">🟣 B.Ext</span><span class="leg leg-bint">🟠 B.Int</span>
+        <span class="leg leg-folga">🏖️ Folga</span>
       </div>
     </div>
-    <div class="presence-grid"><table class="presence-table">
-      <thead><tr><th>Dia Sem.</th><th>Dia</th>
-        ${mots.map(mo=>{const c=state.clients.find(x=>x.id===mo.client);return `<th>${mo.name}${c&&!filterCid?`<br><small style="font-weight:400;opacity:.7">${c.name}</small>`:''}</th>`;}).join('')}
+    <div class="presence-grid"><table class="presence-table" id="pres-table">
+      <thead><tr>
+        <th style="min-width:24px">🎨</th>
+        <th>Dia Sem.</th><th>Dia</th>
+        ${mots.map(mo=>{const c=state.clients.find(x=>x.id===mo.client);return `<th>${mo.name}${c&&filterCids.length!==1?`<br><small style="font-weight:400;opacity:.7">${c.name}</small>`:''}</th>`;}).join('')}
       </tr></thead><tbody>`;
 
   for(let d=1;d<=days;d++){
     const dow=getDow(y,m,d),wk=dow===0||dow===6;
-    html+=`<tr><td class="day-info${wk?' weekend':''}" style="font-size:11px">${DAYS_PT[dow]}</td>
-      <td class="day-info${wk?' weekend':''}" style="font-weight:700">${d}</td>
+    const customColor=getRowColor(y,m,d);
+    const defaultBg=wk?'#fffde7':'#ffffff';
+    const rowBg=customColor||defaultBg;
+    html+=`<tr style="background:${rowBg}">
+      <td style="text-align:center;padding:2px">
+        <input type="color" value="${customColor||'#ffffff'}" title="Cor da linha"
+          style="width:22px;height:22px;border:1px solid #ddd;border-radius:4px;cursor:pointer;padding:0"
+          onchange="window._setRowColor(${y},${m},${d},this.value)">
+      </td>
+      <td class="day-info" style="font-size:11px;background:${rowBg}">${DAYS_PT[dow]}</td>
+      <td class="day-info" style="font-weight:700;background:${rowBg}">${d}</td>
       ${mots.map(mo=>{
         const val=getPresence(y,m,d,mo.id);
-        return `<td class="${wk?'weekend':''} ${statusClass(val)}" id="pc-${d}-${mo.id}">
+        return `<td class="${statusClass(val)}" id="pc-${d}-${mo.id}" style="background-color:inherit">
           <select class="status-select" onchange="window._updatePres(${y},${m},${d},${mo.id},this)">
             ${STATUS_OPTIONS.map(s=>`<option value="${s}" ${s===val?'selected':''}>${s||'—'}</option>`).join('')}
           </select></td>`;
@@ -244,24 +311,38 @@ function renderPresencas(){
     </tr>`;
   }
 
-  html+=`<tr style="background:#f0f4f8;font-weight:700"><td colspan="2" style="text-align:right;padding:8px 12px">Totais</td>
+  // Totals
+  html+=`<tr style="background:#f0f4f8;font-weight:700"><td></td><td colspan="2" style="text-align:right;padding:8px 12px">Totais</td>
     ${mots.map(mo=>{
-      let ok=0,falta=0,form=0,back=0,bext=0,bint=0;
+      let ok=0,fal=0,form=0,back=0,bext=0,bint=0,folga=0;
       for(let d=1;d<=days;d++){const v=getPresence(y,m,d,mo.id);
-        if(v==='OK')ok++;else if(v==='Falta')falta++;else if(v==='Formação')form++;
-        else if(v==='Back Up')back++;else if(v==='Backup Externo')bext++;else if(v==='Backup Interno')bint++;}
-      return `<td style="font-size:11px;text-align:center">${ok?`✅${ok} `:''}${falta?`❌${falta} `:''}${form?`📘${form} `:''}${back?`🔄${back} `:''}${bext?`🟣${bext} `:''}${bint?`🟠${bint}`:''}`;
+        if(v==='OK')ok++;else if(v==='Falta')fal++;else if(v==='Formação')form++;
+        else if(v==='Back Up')back++;else if(v==='Backup Externo')bext++;else if(v==='Backup Interno')bint++;else if(v==='Folga')folga++;}
+      return `<td style="font-size:11px;text-align:center">${ok?`✅${ok} `:''}${fal?`❌${fal} `:''}${form?`📘${form} `:''}${back?`🔄${back} `:''}${bext?`🟣${bext} `:''}${bint?`🟠${bint} `:''}${folga?`🏖️${folga}`:''}`;
     }).join('')}
   </tr></tbody></table></div></div>`;
   document.getElementById('content').innerHTML=html;
 }
-window._presFilter=v=>{state.presencaClient=v;renderPresencas();};
+
+window._presFilterAll=chk=>{
+  if(chk.checked) state.presencaClients=[];
+  renderPresencas();
+};
+window._presFilterToggle=(cid,chk)=>{
+  if(chk.checked){if(!state.presencaClients.includes(cid))state.presencaClients.push(cid);}
+  else state.presencaClients=state.presencaClients.filter(x=>x!==cid);
+  renderPresencas();
+};
 window._updatePres=(y,m,d,mid,sel)=>{
   const old=getPresence(y,m,d,mid);
   setPresence(y,m,d,mid,sel.value);
   logAction('Presença alterada',`Motorista ID ${mid} | Dia ${d}/${m+1}/${y} | ${old||'—'} → ${sel.value||'—'}`);
   const cell=document.getElementById(`pc-${d}-${mid}`);
-  if(cell) cell.className=cell.className.replace(/status-\S+/g,'').trim()+' '+statusClass(sel.value);
+  if(cell) cell.className=statusClass(sel.value);
+};
+window._setRowColor=(y,m,d,color)=>{
+  setRowColor(y,m,d,color==='#ffffff'?'':color);
+  logAction('Cor de linha alterada',`Dia ${d}/${m+1}/${y} → ${color}`);
 };
 
 // ── ENTREGAS ───────────────────────────────────────────
@@ -276,47 +357,78 @@ function renderEntregas(){
 
   let html=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center">
     <span style="font-size:12px;font-weight:600;color:#5f6368">Cliente:</span>
-    ${state.clients.map(c=>`<div class="pill ${c.id===state.selectedClient?'active':''}" onclick="window._selClient(${c.id})">${c.name}</div>`).join('')}
+    ${state.clients.map(c=>`<div class="pill ${c.id===state.selectedClient?'active':''}"
+      style="${c.id===state.selectedClient&&c.color?`background:${c.color};border-color:${c.color};color:#333`:''}"
+      onclick="window._selClient(${c.id})">${c.name}</div>`).join('')}
   </div>`;
 
   if(!client){document.getElementById('content').innerHTML=html+'<div class="card" style="padding:40px;text-align:center">Nenhum cliente.</div>';return;}
 
+  const clientColor=client.color||'#ffffff';
+  const headerColor=lightenColor(clientColor,0.4);
   const days=daysInMonth(y,m),fields=client.fields,totals={};
   fields.forEach(f=>totals[f]=0);
 
-  html+=`<div class="card">
-    <div class="card-header">
+  html+=`<div class="card" style="border-top:4px solid ${clientColor}">
+    <div class="card-header" style="background:${headerColor};margin:-20px -20px 16px;padding:16px 20px;border-radius:12px 12px 0 0">
       <span class="card-title">${client.name} — ${MONTHS[m]} ${y}</span>
       <span style="font-size:12px;color:#5f6368">${state.motoristas.filter(mo=>mo.client===client.id&&mo.active!==false).map(m=>m.name).join(', ')}</span>
     </div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Dia Sem.</th><th>Dia</th>${fields.map(f=>`<th>${f}</th>`).join('')}<th>Total Dia</th><th>EDR%</th></tr></thead>
-      <tbody>`;
+      <thead><tr style="background:${headerColor}">
+        <th>Dia Sem.</th><th>Dia</th>
+        ${fields.map(f=>`<th>${f}</th>`).join('')}
+        <th>EDR%</th>
+      </tr></thead><tbody>`;
 
+  let activeDays=0;
   for(let d=1;d<=days;d++){
-    const dow=getDow(y,m,d),wk=dow===0||dow===6,bg=wk?'background:#fffde7':'';
+    const dow=getDow(y,m,d),wk=dow===0||dow===6;
+    const customColor=getRowColor(y,m,d);
+    const rowBg=customColor||(wk?'#fffde7':clientColor+'22');
     const vals={};fields.forEach(f=>{vals[f]=getEntrega(client.id,y,m,d,f);totals[f]+=vals[f];});
-    const rowTotal=fields.reduce((s,f)=>s+vals[f],0);
-    const edrVal=rowTotal>0?Math.round((vals[fields[0]]/rowTotal)*100):null;
-    html+=`<tr style="${bg}">
-      <td style="font-size:11px">${DAYS_PT[dow]}</td><td style="font-weight:700">${d}</td>
+    const rowSum=fields.reduce((s,f)=>s+(vals[f]||0),0);
+    if(rowSum>0) activeDays++;
+    const edrVal=calcRowEDR(client,vals);
+    html+=`<tr style="background:${rowBg}">
+      <td style="font-size:11px">${DAYS_PT[dow]}</td>
+      <td style="font-weight:700">${d}</td>
       ${fields.map(f=>`<td><input class="delivery-input" type="number" min="0" value="${vals[f]||''}" placeholder="0"
         onchange="window._updateEnt(${client.id},${y},${m},${d},'${encodeF(f)}','${f}',this.value,${d})" /></td>`).join('')}
-      <td style="font-weight:600" id="total-${d}">${rowTotal||''}</td>
       <td class="edr-cell ${edrClass(edrVal)}" id="edr-${d}">${edrVal!==null?edrVal+'%':'—'}</td>
     </tr>`;
   }
 
-  const grandTotal=fields.reduce((s,f)=>s+totals[f],0);
-  const edrTotal=grandTotal>0?Math.round((totals[fields[0]]/grandTotal)*100):null;
-  html+=`<tr style="background:#f0f4f8;font-weight:700">
+  // Total row
+  const edrTotal=calcTotalEDR(client,totals);
+  html+=`<tr style="background:${headerColor};font-weight:700" id="totals-row">
     <td colspan="2">Total</td>
     ${fields.map(f=>`<td id="ctotal-${encodeF(f)}">${totals[f].toLocaleString()}</td>`).join('')}
-    <td id="grand-total">${grandTotal.toLocaleString()}</td>
     <td class="edr-cell ${edrClass(edrTotal)}" id="edr-total">${edrTotal!==null?edrTotal+'%':'—'}</td>
-  </tr></tbody></table></div></div>`;
+  </tr>`;
+
+  // Media row
+  const mediaEDR=edrTotal; // same as total EDR
+  html+=`<tr style="background:${clientColor}33;font-style:italic;color:#555">
+    <td colspan="2" style="font-size:12px">Média (${activeDays} dias)</td>
+    ${fields.map(f=>`<td id="cmedia-${encodeF(f)}" style="font-size:12px">${activeDays>0?Math.round(totals[f]/activeDays):0}</td>`).join('')}
+    <td class="edr-cell ${edrClass(mediaEDR)}" style="font-size:12px">${mediaEDR!==null?mediaEDR+'%':'—'}</td>
+  </tr>`;
+
+  html+=`</tbody></table></div></div>`;
   document.getElementById('content').innerHTML=html;
 }
+
+function lightenColor(hex,amount){
+  // mix hex with white
+  try{
+    hex=hex.replace('#','');
+    const r=parseInt(hex.substring(0,2),16),g=parseInt(hex.substring(2,4),16),b=parseInt(hex.substring(4,6),16);
+    const nr=Math.round(r+(255-r)*amount),ng=Math.round(g+(255-g)*amount),nb=Math.round(b+(255-b)*amount);
+    return `rgb(${nr},${ng},${nb})`;
+  }catch(e){return '#f8f9fa';}
+}
+
 window._selClient=id=>{state.selectedClient=id;renderEntregas();};
 window._updateEnt=(cid,y,m,d,fKey,fLabel,val,day)=>{
   const old=getEntrega(cid,y,m,d,fLabel);
@@ -324,31 +436,32 @@ window._updateEnt=(cid,y,m,d,fKey,fLabel,val,day)=>{
   const client=state.clients.find(c=>c.id===cid);
   logAction('Entrega editada',`Cliente: ${client?.name} | Campo: ${fLabel} | Dia ${d}/${m+1}/${y} | ${old} → ${val}`);
   if(!client)return;
-  const rowTotal=client.fields.reduce((s,f)=>s+getEntrega(cid,y,m,d,f),0);
-  const edrVal=rowTotal>0?Math.round((getEntrega(cid,y,m,d,client.fields[0])/rowTotal)*100):null;
-  const tc=document.getElementById(`total-${day}`);if(tc)tc.textContent=rowTotal||'';
+  const vals={};client.fields.forEach(f=>vals[f]=getEntrega(cid,y,m,d,f));
+  const edrVal=calcRowEDR(client,vals);
   const ec=document.getElementById(`edr-${day}`);if(ec){ec.textContent=edrVal!==null?edrVal+'%':'—';ec.className=`edr-cell ${edrClass(edrVal)}`;}
-  let grandTotal=0;
-  client.fields.forEach(f=>{
-    let s=0;for(let dd=1;dd<=daysInMonth(y,m);dd++)s+=getEntrega(cid,y,m,dd,f);
-    const el=document.getElementById(`ctotal-${encodeF(f)}`);if(el)el.textContent=s.toLocaleString();
-    grandTotal+=s;
-  });
-  const gt=document.getElementById('grand-total');if(gt)gt.textContent=grandTotal.toLocaleString();
-  const etot=grandTotal>0?Math.round((colTotal(cid,y,m,client.fields[0])/grandTotal)*100):null;
-  const et=document.getElementById('edr-total');if(et){et.textContent=etot!==null?etot+'%':'—';et.className=`edr-cell ${edrClass(etot)}`;}
+  // recalc totals
+  const totals={};client.fields.forEach(f=>{let s=0;for(let dd=1;dd<=daysInMonth(y,m);dd++)s+=getEntrega(cid,y,m,dd,f);totals[f]=s;});
+  client.fields.forEach(f=>{const el=document.getElementById(`ctotal-${encodeF(f)}`);if(el)el.textContent=totals[f].toLocaleString();});
+  const edrT=calcTotalEDR(client,totals);
+  const et=document.getElementById('edr-total');if(et){et.textContent=edrT!==null?edrT+'%':'—';et.className=`edr-cell ${edrClass(edrT)}`;}
+  // recalc media
+  let activeDays=0;
+  for(let dd=1;dd<=daysInMonth(y,m);dd++){const s=client.fields.reduce((x,f)=>x+getEntrega(cid,y,m,dd,f),0);if(s>0)activeDays++;}
+  client.fields.forEach(f=>{const el=document.getElementById(`cmedia-${encodeF(f)}`);if(el)el.textContent=activeDays>0?Math.round(totals[f]/activeDays):0;});
 };
-function colTotal(cid,y,m,field){let s=0;for(let d=1;d<=daysInMonth(y,m);d++)s+=getEntrega(cid,y,m,d,field);return s;}
 
 // ── CLIENTES ───────────────────────────────────────────
 function renderClientes(){
   document.getElementById('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="window._openClientModal()">+ Novo Cliente</button>`;
   document.getElementById('content').innerHTML=`<div class="card"><div class="tbl-wrap"><table>
-    <thead><tr><th>Cliente</th><th>Localização</th><th>Campos</th><th>Motoristas Ativos</th><th>Ações</th></tr></thead>
+    <thead><tr><th>Cor</th><th>Cliente</th><th>Localização</th><th>Campos</th><th>Motoristas</th><th>Ações</th></tr></thead>
     <tbody>${state.clients.map(c=>{
       const mots=state.motoristas.filter(mo=>mo.client===c.id&&mo.active!==false).map(mo=>mo.name).join(', ');
-      return `<tr><td><strong>${c.name}</strong></td><td>${c.location}</td><td><small>${c.fields.join(', ')}</small></td><td>${mots||'—'}</td>
-        <td><button class="btn btn-outline btn-sm" onclick="window._openClientModal(${c.id})">✏️ Editar</button>
+      return `<tr>
+        <td><div style="width:24px;height:24px;border-radius:6px;background:${c.color||'#eee'};border:1px solid #ddd"></div></td>
+        <td><strong>${c.name}</strong></td><td>${c.location}</td>
+        <td><small>${c.fields.join(', ')}</small></td><td>${mots||'—'}</td>
+        <td><button class="btn btn-outline btn-sm" onclick="window._openClientModal(${c.id})">✏️</button>
         <button class="btn btn-danger btn-sm" onclick="window._delClient(${c.id})">🗑️</button></td></tr>`;
     }).join('')}</tbody>
   </table></div></div>`;
@@ -361,8 +474,14 @@ window._openClientModal=function(id){
     <div class="form-grid">
       <div class="form-group"><label>Nome</label><input id="c-name" value="${c?.name||''}"/></div>
       <div class="form-group"><label>Localização</label><input id="c-loc" value="${c?.location||''}"/></div>
+      <div class="form-group"><label>Cor do cliente</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="color" id="c-color" value="${c?.color||'#e3f2fd'}" style="width:50px;height:38px;border-radius:8px;border:1px solid #dadce0;cursor:pointer;padding:2px"/>
+          <span style="font-size:12px;color:#5f6368">Escolhe uma cor clara para melhor leitura</span>
+        </div>
+      </div>
     </div>
-    <div class="form-group" style="margin-top:16px"><label>Campos do quadro</label>
+    <div class="form-group" style="margin-top:16px"><label>Campos do quadro de entregas</label>
       <div class="fields-check">${ALL_FIELDS.map(f=>`<label><input type="checkbox" value="${f}" ${c?.fields.includes(f)?'checked':''}> ${f}</label>`).join('')}</div>
       <div style="margin-top:8px;display:flex;gap:8px">
         <input id="custom-field" placeholder="Campo personalizado..." style="padding:6px 10px;border:1px solid #dadce0;border-radius:6px;font-size:12px;flex:1">
@@ -384,21 +503,16 @@ window._addCustomField=()=>{
 window._saveClient=async id=>{
   const name=document.getElementById('c-name').value.trim();
   const location=document.getElementById('c-loc').value.trim();
+  const color=document.getElementById('c-color').value;
   const fields=[...document.querySelectorAll('#modal-body input[type=checkbox]:checked')].map(i=>i.value);
   if(!name)return alert('Nome obrigatório');if(!fields.length)return alert('Selecione pelo menos um campo');
-  if(id){
-    const c=state.clients.find(x=>x.id===id);c.name=name;c.location=location;c.fields=fields;
-    logAction('Cliente editado',`ID ${id} | Nome: ${name}`);
-  } else {
-    state.clients.push({id:nextId(state.clients),name,location,fields});
-    logAction('Cliente criado',`Nome: ${name} | Local: ${location}`);
-  }
+  if(id){const c=state.clients.find(x=>x.id===id);c.name=name;c.location=location;c.color=color;c.fields=fields;logAction('Cliente editado',`ID ${id} | Nome: ${name}`);}
+  else{state.clients.push({id:nextId(state.clients),name,location,color,fields});logAction('Cliente criado',`Nome: ${name}`);}
   await saveConfig();window._closeModal();renderClientes();
 };
 window._delClient=async id=>{
   if(!confirm('Tem certeza?'))return;
-  const c=state.clients.find(x=>x.id===id);
-  logAction('Cliente removido',`ID ${id} | Nome: ${c?.name}`);
+  const c=state.clients.find(x=>x.id===id);logAction('Cliente removido',`ID ${id} | Nome: ${c?.name}`);
   state.clients=state.clients.filter(c=>c.id!==id);await saveConfig();renderClientes();
 };
 
@@ -406,33 +520,26 @@ window._delClient=async id=>{
 function renderMotoristas(){
   document.getElementById('topbar-actions').innerHTML=`
     <button class="btn btn-primary" onclick="window._openMotoModal()">+ Novo Motorista</button>
-    <select onchange="window._motoFilter(this.value)" id="moto-filter" style="padding:6px 10px;border:1px solid #dadce0;border-radius:8px;font-size:13px">
-      <option value="all">Todos</option>
-      <option value="active">Ativos</option>
-      <option value="inactive">Inativos</option>
+    <select id="moto-status-filter" onchange="renderMotoristas()" style="padding:6px 10px;border:1px solid #dadce0;border-radius:8px;font-size:13px">
+      <option value="all">Todos</option><option value="active">Ativos</option><option value="inactive">Inativos</option>
     </select>`;
-
-  const filterVal=document.getElementById('moto-filter')?.value||'all';
+  const fv=document.getElementById('moto-status-filter')?.value||'all';
   let mots=state.motoristas;
-  if(filterVal==='active') mots=mots.filter(m=>m.active!==false);
-  if(filterVal==='inactive') mots=mots.filter(m=>m.active===false);
-
+  if(fv==='active')mots=mots.filter(m=>m.active!==false);
+  if(fv==='inactive')mots=mots.filter(m=>m.active===false);
   document.getElementById('content').innerHTML=`<div class="card"><div class="tbl-wrap"><table>
-    <thead><tr><th>Nome</th><th>Cliente</th><th>Contacto</th><th>Data Entrada</th><th>Data Saída</th><th>Estado</th><th>Ações</th></tr></thead>
+    <thead><tr><th>Nome</th><th>Cliente</th><th>Contacto</th><th>Entrada</th><th>Saída</th><th>Estado</th><th>Ações</th></tr></thead>
     <tbody>${mots.map(mo=>{
-      const c=state.clients.find(x=>x.id===mo.client);
-      const ativo=mo.active!==false;
+      const c=state.clients.find(x=>x.id===mo.client);const ativo=mo.active!==false;
       return `<tr style="${!ativo?'opacity:.6':''}">
         <td><strong>${mo.name}</strong></td><td>${c?.name||'—'}</td><td>${mo.contact||'—'}</td>
-        <td>${fmtDate(mo.entryDate)}</td><td>${fmtDate(mo.exitDate)||'—'}</td>
+        <td>${fmtDate(mo.entryDate)}</td><td>${mo.exitDate?fmtDate(mo.exitDate):'—'}</td>
         <td><span class="badge ${ativo?'badge-ok':'badge-falta'}">${ativo?'✅ Ativo':'❌ Inativo'}</span></td>
-        <td><button class="btn btn-outline btn-sm" onclick="window._openMotoModal(${mo.id})">✏️ Editar</button>
+        <td><button class="btn btn-outline btn-sm" onclick="window._openMotoModal(${mo.id})">✏️</button>
         <button class="btn btn-danger btn-sm" onclick="window._delMoto(${mo.id})">🗑️</button></td></tr>`;
     }).join('')}</tbody>
   </table></div></div>`;
 }
-window._motoFilter=v=>{renderMotoristas();};
-
 window._openMotoModal=function(id){
   const mo=id?state.motoristas.find(x=>x.id===id):null;
   document.getElementById('modal-title').textContent=mo?'Editar Motorista':'Novo Motorista';
@@ -441,8 +548,7 @@ window._openMotoModal=function(id){
       <div class="form-group"><label>Nome</label><input id="m-name" value="${mo?.name||''}"/></div>
       <div class="form-group"><label>Contacto</label><input id="m-contact" value="${mo?.contact||''}"/></div>
       <div class="form-group"><label>Cliente</label>
-        <select id="m-client">
-          <option value="">— Sem cliente —</option>
+        <select id="m-client"><option value="">— Sem cliente —</option>
           ${state.clients.map(c=>`<option value="${c.id}" ${mo?.client===c.id?'selected':''}>${c.name}</option>`).join('')}
         </select>
       </div>
@@ -469,21 +575,13 @@ window._saveMoto=async id=>{
   const exitDate=document.getElementById('m-exit').value;
   const active=document.getElementById('m-active').value==='true';
   if(!name)return alert('Nome obrigatório');
-  if(id){
-    const mo=state.motoristas.find(x=>x.id===id);
-    const old={...mo};
-    Object.assign(mo,{name,contact,client,entryDate,exitDate,active});
-    logAction('Motorista editado',`ID ${id} | Nome: ${name} | Ativo: ${active} | Entrada: ${entryDate} | Saída: ${exitDate}`);
-  } else {
-    state.motoristas.push({id:nextId(state.motoristas),name,contact,client,entryDate,exitDate,active});
-    logAction('Motorista criado',`Nome: ${name} | Cliente ID: ${client} | Entrada: ${entryDate}`);
-  }
+  if(id){const mo=state.motoristas.find(x=>x.id===id);Object.assign(mo,{name,contact,client,entryDate,exitDate,active});logAction('Motorista editado',`ID ${id} | ${name} | Ativo:${active}`);}
+  else{state.motoristas.push({id:nextId(state.motoristas),name,contact,client,entryDate,exitDate,active});logAction('Motorista criado',`Nome: ${name}`);}
   await saveConfig();window._closeModal();renderMotoristas();
 };
 window._delMoto=async id=>{
   if(!confirm('Tem certeza?'))return;
-  const mo=state.motoristas.find(x=>x.id===id);
-  logAction('Motorista removido',`ID ${id} | Nome: ${mo?.name}`);
+  const mo=state.motoristas.find(x=>x.id===id);logAction('Motorista removido',`ID ${id} | ${mo?.name}`);
   state.motoristas=state.motoristas.filter(x=>x.id!==id);await saveConfig();renderMotoristas();
 };
 
@@ -496,94 +594,77 @@ function renderRelatorios(){
     <div class="card-header"><span class="card-title">Gerar Relatório por Período</span></div>
     <div class="form-grid">
       <div class="form-group"><label>Tipo</label>
-        <select id="rep-type">
-          <option value="entregas">Entregas por Cliente</option>
-          <option value="presencas">Presenças</option>
-        </select>
+        <select id="rep-type"><option value="entregas">Entregas por Cliente</option><option value="presencas">Presenças</option></select>
       </div>
       <div class="form-group"><label>Cliente</label>
-        <select id="rep-client">
-          <option value="all">Todos</option>
+        <select id="rep-client"><option value="all">Todos</option>
           ${state.clients.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}
         </select>
       </div>
-      <div class="form-group"><label>Data de Início</label>
-        <input type="date" id="rep-start" value="${firstOfMonth}"/>
-      </div>
-      <div class="form-group"><label>Data de Fim</label>
-        <input type="date" id="rep-end" value="${today}"/>
-      </div>
+      <div class="form-group"><label>Data de Início</label><input type="date" id="rep-start" value="${firstOfMonth}"/></div>
+      <div class="form-group"><label>Data de Fim</label><input type="date" id="rep-end" value="${today}"/></div>
     </div>
     <div style="display:flex;gap:8px;margin-top:20px">
       <button class="btn btn-success" onclick="window._exportExcelPeriod()">⬇ Exportar Excel</button>
-      <button class="btn btn-primary" onclick="window._exportPDFPeriod()">🖨️ Imprimir / PDF</button>
+      <button class="btn btn-primary" onclick="window._exportPDFPeriod()">🖨️ PDF</button>
     </div>
   </div>`;
 }
 
-// Build list of {year,month,day} between two date strings
-function dateRange(startStr,endStr){
-  const start=new Date(startStr),end=new Date(endStr),result=[];
+function dateRange(s,e){
+  const start=new Date(s),end=new Date(e),res=[];
   const cur=new Date(start);
-  while(cur<=end){result.push({y:cur.getFullYear(),m:cur.getMonth(),d:cur.getDate()});cur.setDate(cur.getDate()+1);}
-  return result;
+  while(cur<=end){res.push({y:cur.getFullYear(),m:cur.getMonth(),d:cur.getDate()});cur.setDate(cur.getDate()+1);}
+  return res;
 }
-
-async function ensureMonthLoaded(y,m){
+async function ensureMonth(y,m){
   const mk=`${y}-${String(m+1).padStart(2,'0')}`;
-  const p=await fbGet(`presencas/${mk}`);if(p) state.presencas={...state.presencas,...p};
-  const e=await fbGet(`entregas/${mk}`);if(e) state.entregas={...state.entregas,...e};
+  const p=await fbGet(`presencas/${mk}`);if(p)state.presencas={...state.presencas,...p};
+  const e=await fbGet(`entregas/${mk}`);if(e)state.entregas={...state.entregas,...e};
 }
 
 window._exportExcelPeriod=async()=>{
-  const type=document.getElementById('rep-type').value;
-  const clientId=document.getElementById('rep-client').value;
-  const startStr=document.getElementById('rep-start').value;
-  const endStr=document.getElementById('rep-end').value;
+  const type=document.getElementById('rep-type').value,clientId=document.getElementById('rep-client').value;
+  const startStr=document.getElementById('rep-start').value,endStr=document.getElementById('rep-end').value;
   if(!startStr||!endStr)return alert('Selecione as datas');
   const days=dateRange(startStr,endStr);
-  // Ensure all months loaded
   const months=[...new Set(days.map(x=>`${x.y}-${x.m}`))];
-  for(const mk of months){const[y,m]=mk.split('-').map(Number);await ensureMonthLoaded(y,m);}
+  for(const mk of months){const[y,m]=mk.split('-').map(Number);await ensureMonth(y,m);}
   const wb=XLSX.utils.book_new();
   const clients=clientId==='all'?state.clients:state.clients.filter(c=>c.id===Number(clientId));
   if(type==='presencas'){
     const mots=clientId==='all'?state.motoristas.filter(m=>m.active!==false):state.motoristas.filter(m=>m.client===Number(clientId)&&m.active!==false);
     const rows=[['Data','Dia Semana',...mots.map(m=>m.name)]];
-    days.forEach(({y,m,d})=>{
-      rows.push([`${d}/${m+1}/${y}`,DAYS_PT[getDow(y,m,d)],...mots.map(mo=>getPresence(y,m,d,mo.id)||'')]);
-    });
+    days.forEach(({y,m,d})=>rows.push([`${d}/${m+1}/${y}`,DAYS_PT[getDow(y,m,d)],...mots.map(mo=>getPresence(y,m,d,mo.id)||'')]));
     XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),'Presenças');
   } else {
     clients.forEach(c=>{
       const tots={};c.fields.forEach(f=>tots[f]=0);
-      const rows=[['Data','Dia Semana',...c.fields,'Total Dia','EDR%']];
+      const rows=[['Data','Dia',...c.fields,'EDR%']];
       days.forEach(({y,m,d})=>{
         const vals=c.fields.map(f=>{const v=getEntrega(c.id,y,m,d,f);tots[f]+=v;return v;});
-        const rt=vals.reduce((a,b)=>a+b,0);
-        rows.push([`${d}/${m+1}/${y}`,DAYS_PT[getDow(y,m,d)],...vals,rt,rt>0?Math.round((vals[0]/rt)*100)+'%':'']);
+        const vobj={};c.fields.forEach((f,i)=>vobj[f]=vals[i]);
+        rows.push([`${d}/${m+1}/${y}`,DAYS_PT[getDow(y,m,d)],...vals,calcRowEDR(c,vobj)!==null?calcRowEDR(c,vobj)+'%':'']);
       });
-      const gt=c.fields.reduce((s,f)=>s+tots[f],0);
-      rows.push(['TOTAL','',...c.fields.map(f=>tots[f]),gt,gt>0?Math.round((tots[c.fields[0]]/gt)*100)+'%':'']);
+      const edrT=calcTotalEDR(c,tots);
+      rows.push(['TOTAL','',...c.fields.map(f=>tots[f]),edrT!==null?edrT+'%':'']);
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),c.name.substring(0,31));
     });
   }
   XLSX.writeFile(wb,`relatorio_${startStr}_${endStr}.xlsx`);
-  logAction('Relatório Excel exportado',`Tipo: ${type} | Período: ${startStr} a ${endStr}`);
+  logAction('Excel exportado',`Tipo:${type} | ${startStr} a ${endStr}`);
 };
 
 window._exportPDFPeriod=async()=>{
-  const type=document.getElementById('rep-type').value;
-  const clientId=document.getElementById('rep-client').value;
-  const startStr=document.getElementById('rep-start').value;
-  const endStr=document.getElementById('rep-end').value;
+  const type=document.getElementById('rep-type').value,clientId=document.getElementById('rep-client').value;
+  const startStr=document.getElementById('rep-start').value,endStr=document.getElementById('rep-end').value;
   if(!startStr||!endStr)return alert('Selecione as datas');
   const days=dateRange(startStr,endStr);
   const months=[...new Set(days.map(x=>`${x.y}-${x.m}`))];
-  for(const mk of months){const[y,m]=mk.split('-').map(Number);await ensureMonthLoaded(y,m);}
+  for(const mk of months){const[y,m]=mk.split('-').map(Number);await ensureMonth(y,m);}
   const clients=clientId==='all'?state.clients:state.clients.filter(c=>c.id===Number(clientId));
-  let html=`<html><head><style>body{font-family:Arial;font-size:11px;padding:20px}h2{color:#1a73e8;margin-bottom:6px}h3{margin:16px 0 6px}p{color:#666;font-size:11px;margin-bottom:12px}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#1e2a3a;color:#fff;padding:6px 8px}td{padding:5px 8px;border-bottom:1px solid #eee}tr:nth-child(even)td{background:#f9f9f9}.eh{color:#137333;font-weight:700}.el{color:#c5221f;font-weight:700}.tr td{background:#e8f0fe!important;font-weight:700}</style></head><body>
-  <h2>TrafficLogistics DE</h2><p>Período: ${startStr} a ${endStr}</p>`;
+  let html=`<html><head><style>body{font-family:Arial;font-size:10px;padding:16px}h2{color:#1a73e8}h3{margin:14px 0 6px}table{width:100%;border-collapse:collapse;margin-bottom:16px}th{background:#1e2a3a;color:#fff;padding:5px 6px}td{padding:4px 6px;border-bottom:1px solid #eee}.eh{color:#137333;font-weight:700}.el{color:#c5221f;font-weight:700}.tr td{background:#e8f0fe!important;font-weight:700}</style></head><body>
+  <h2>TrafficLogistics DE — ${startStr} a ${endStr}</h2>`;
   if(type==='presencas'){
     const mots=clientId==='all'?state.motoristas.filter(m=>m.active!==false):state.motoristas.filter(m=>m.client===Number(clientId)&&m.active!==false);
     html+=`<table><thead><tr><th>Data</th><th>Semana</th>${mots.map(m=>`<th>${m.name}</th>`).join('')}</tr></thead><tbody>`;
@@ -592,36 +673,36 @@ window._exportPDFPeriod=async()=>{
   } else {
     clients.forEach(c=>{
       const tots={};c.fields.forEach(f=>tots[f]=0);
-      html+=`<h3>${c.name}</h3><table><thead><tr><th>Data</th>${c.fields.map(f=>`<th>${f}</th>`).join('')}<th>Total</th><th>EDR%</th></tr></thead><tbody>`;
+      html+=`<h3>${c.name}</h3><table><thead><tr><th>Data</th>${c.fields.map(f=>`<th>${f}</th>`).join('')}<th>EDR%</th></tr></thead><tbody>`;
       days.forEach(({y,m,d})=>{
         const vals=c.fields.map(f=>{const v=getEntrega(c.id,y,m,d,f);tots[f]+=v;return v;});
+        const vobj={};c.fields.forEach((f,i)=>vobj[f]=vals[i]);
         const rt=vals.reduce((a,b)=>a+b,0);if(rt===0)return;
-        const edr=Math.round((vals[0]/rt)*100);
-        html+=`<tr><td>${d}/${m+1}/${y}</td>${vals.map(v=>`<td>${v||''}</td>`).join('')}<td>${rt}</td><td class="${edr>=95?'eh':edr<80?'el':''}">${edr}%</td></tr>`;
+        const edr=calcRowEDR(c,vobj);
+        html+=`<tr><td>${d}/${m+1}/${y}</td>${vals.map(v=>`<td>${v||''}</td>`).join('')}<td class="${edr!==null?(edr>=95?'eh':edr<80?'el':''):''}">${edr!==null?edr+'%':'—'}</td></tr>`;
       });
-      const gt=c.fields.reduce((s,f)=>s+tots[f],0),edrT=gt>0?Math.round((tots[c.fields[0]]/gt)*100):null;
-      html+=`<tr class="tr"><td>TOTAL</td>${c.fields.map(f=>`<td>${tots[f]}</td>`).join('')}<td>${gt}</td><td>${edrT!==null?edrT+'%':'—'}</td></tr></tbody></table>`;
+      const edrT=calcTotalEDR(c,tots);
+      html+=`<tr class="tr"><td>TOTAL</td>${c.fields.map(f=>`<td>${tots[f]}</td>`).join('')}<td>${edrT!==null?edrT+'%':'—'}</td></tr></tbody></table>`;
     });
   }
   html+=`</body></html>`;
   const w=window.open('','_blank');w.document.write(html);w.document.close();w.print();
-  logAction('Relatório PDF exportado',`Tipo: ${type} | Período: ${startStr} a ${endStr}`);
 };
 
-// ── EXPORTS RÁPIDOS ────────────────────────────────────
+// Quick exports
 window._exportPresExcel=()=>{
   const y=state.year,m=state.month,days=daysInMonth(y,m);
-  const mots=state.presencaClient==='all'?state.motoristas.filter(mo=>mo.active!==false):state.motoristas.filter(mo=>mo.client===Number(state.presencaClient)&&mo.active!==false);
+  const mots=state.presencaClients.length>0?state.motoristas.filter(mo=>state.presencaClients.includes(mo.client)&&mo.active!==false):state.motoristas.filter(mo=>mo.active!==false);
   const wb=XLSX.utils.book_new();
   const rows=[['Dia Semana','Dia',...mots.map(m=>m.name)]];
-  for(let d=1;d<=days;d++) rows.push([DAYS_PT[getDow(y,m,d)],d,...mots.map(mo=>getPresence(y,m,d,mo.id)||'')]);
+  for(let d=1;d<=days;d++)rows.push([DAYS_PT[getDow(y,m,d)],d,...mots.map(mo=>getPresence(y,m,d,mo.id)||'')]);
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),'Presenças');
   XLSX.writeFile(wb,`presencas_${MONTHS[m]}_${y}.xlsx`);
 };
 window._exportPresPDF=()=>{
   const y=state.year,m=state.month,days=daysInMonth(y,m);
-  const mots=state.presencaClient==='all'?state.motoristas.filter(mo=>mo.active!==false):state.motoristas.filter(mo=>mo.client===Number(state.presencaClient)&&mo.active!==false);
-  let html=`<html><head><style>body{font-family:Arial;font-size:10px;padding:16px}h2{color:#1a73e8;margin-bottom:8px}table{width:100%;border-collapse:collapse}th{background:#1e2a3a;color:#fff;padding:5px 6px;font-size:10px}td{padding:4px 6px;border-bottom:1px solid #eee;text-align:center}.wi{background:#fffde7}</style></head><body>
+  const mots=state.presencaClients.length>0?state.motoristas.filter(mo=>state.presencaClients.includes(mo.client)&&mo.active!==false):state.motoristas.filter(mo=>mo.active!==false);
+  let html=`<html><head><style>body{font-family:Arial;font-size:9px;padding:12px}h2{color:#1a73e8;margin-bottom:6px}table{width:100%;border-collapse:collapse}th{background:#1e2a3a;color:#fff;padding:4px 5px}td{padding:3px 5px;border-bottom:1px solid #eee;text-align:center}.wi{background:#fffde7}</style></head><body>
   <h2>Presenças — ${MONTHS[m]} ${y}</h2><table><thead><tr><th>Dia</th><th>Semana</th>${mots.map(mo=>`<th>${mo.name}</th>`).join('')}</tr></thead><tbody>`;
   for(let d=1;d<=days;d++){const dow=getDow(y,m,d),wk=dow===0||dow===6;html+=`<tr class="${wk?'wi':''}"><td>${d}</td><td>${DAYS_PT[dow]}</td>${mots.map(mo=>`<td>${getPresence(y,m,d,mo.id)||'—'}</td>`).join('')}</tr>`;}
   html+=`</tbody></table></body></html>`;
@@ -632,14 +713,15 @@ window._exportEntExcel=()=>{
   const y=state.year,m=state.month,days=daysInMonth(y,m),tots={};
   client.fields.forEach(f=>tots[f]=0);
   const wb=XLSX.utils.book_new();
-  const rows=[['Dia Semana','Dia',...client.fields,'Total Dia','EDR%']];
+  const rows=[['Dia Semana','Dia',...client.fields,'EDR%']];
   for(let d=1;d<=days;d++){
     const vals=client.fields.map(f=>{const v=getEntrega(client.id,y,m,d,f);tots[f]+=v;return v;});
-    const rt=vals.reduce((a,b)=>a+b,0);
-    rows.push([DAYS_PT[getDow(y,m,d)],d,...vals,rt,rt>0?Math.round((vals[0]/rt)*100)+'%':'']);
+    const vobj={};client.fields.forEach((f,i)=>vobj[f]=vals[i]);
+    const edr=calcRowEDR(client,vobj);
+    rows.push([DAYS_PT[getDow(y,m,d)],d,...vals,edr!==null?edr+'%':'']);
   }
-  const gt=client.fields.reduce((s,f)=>s+tots[f],0);
-  rows.push(['TOTAL','',...client.fields.map(f=>tots[f]),gt,gt>0?Math.round((tots[client.fields[0]]/gt)*100)+'%':'']);
+  const edrT=calcTotalEDR(client,tots);
+  rows.push(['TOTAL','',...client.fields.map(f=>tots[f]),edrT!==null?edrT+'%':'']);
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),client.name);
   XLSX.writeFile(wb,`${client.name}_${MONTHS[m]}_${y}.xlsx`);
 };
@@ -647,17 +729,18 @@ window._exportEntPDF=()=>{
   const client=state.clients.find(c=>c.id===state.selectedClient);if(!client)return;
   const y=state.year,m=state.month,days=daysInMonth(y,m),tots={};
   client.fields.forEach(f=>tots[f]=0);
-  let html=`<html><head><style>body{font-family:Arial;font-size:10px;padding:16px}h2{color:#1a73e8;margin-bottom:8px}table{width:100%;border-collapse:collapse}th{background:#1e2a3a;color:#fff;padding:5px 6px;font-size:9px}td{padding:4px 6px;border-bottom:1px solid #eee;text-align:center}.wi{background:#fffde7}.eh{color:#137333;font-weight:700}.el{color:#c5221f;font-weight:700}.tr td{background:#e8f0fe!important;font-weight:700}</style></head><body>
-  <h2>${client.name} — ${MONTHS[m]} ${y}</h2><table><thead><tr><th>Dia</th><th>Semana</th>${client.fields.map(f=>`<th>${f}</th>`).join('')}<th>Total</th><th>EDR%</th></tr></thead><tbody>`;
+  const hc=client.color||'#e3f2fd';
+  let html=`<html><head><style>body{font-family:Arial;font-size:9px;padding:12px}h2{color:#1a73e8;margin-bottom:6px}table{width:100%;border-collapse:collapse}th{background:#1e2a3a;color:#fff;padding:4px 5px}td{padding:3px 5px;border-bottom:1px solid #eee;text-align:center}.wi{background:#fffde7}.eh{color:#137333;font-weight:700}.el{color:#c5221f;font-weight:700}.tr td{background:${hc}!important;font-weight:700}</style></head><body>
+  <h2>${client.name} — ${MONTHS[m]} ${y}</h2><table><thead><tr><th>Dia</th><th>Sem.</th>${client.fields.map(f=>`<th>${f}</th>`).join('')}<th>EDR%</th></tr></thead><tbody>`;
   for(let d=1;d<=days;d++){
     const dow=getDow(y,m,d),wk=dow===0||dow===6;
     const vals=client.fields.map(f=>{const v=getEntrega(client.id,y,m,d,f);tots[f]+=v;return v;});
-    const rt=vals.reduce((a,b)=>a+b,0);
-    const edr=rt>0?Math.round((vals[0]/rt)*100):null;
-    html+=`<tr class="${wk?'wi':''}"><td>${d}</td><td style="font-size:9px">${DAYS_PT[dow].substring(0,3)}</td>${vals.map(v=>`<td>${v||''}</td>`).join('')}<td><strong>${rt||''}</strong></td><td class="${edr!==null?(edr>=95?'eh':edr<80?'el':''):''}">${edr!==null?edr+'%':'—'}</td></tr>`;
+    const vobj={};client.fields.forEach((f,i)=>vobj[f]=vals[i]);
+    const edr=calcRowEDR(client,vobj);
+    html+=`<tr class="${wk?'wi':''}"><td>${d}</td><td>${DAYS_PT[dow].substring(0,3)}</td>${vals.map(v=>`<td>${v||''}</td>`).join('')}<td class="${edr!==null?(edr>=95?'eh':edr<80?'el':''):''}">${edr!==null?edr+'%':'—'}</td></tr>`;
   }
-  const gt=client.fields.reduce((s,f)=>s+tots[f],0),edrT=gt>0?Math.round((tots[client.fields[0]]/gt)*100):null;
-  html+=`<tr class="tr"><td colspan="2">TOTAL</td>${client.fields.map(f=>`<td>${tots[f]}</td>`).join('')}<td>${gt}</td><td>${edrT!==null?edrT+'%':'—'}</td></tr>`;
+  const edrT=calcTotalEDR(client,tots);
+  html+=`<tr class="tr"><td colspan="2">TOTAL</td>${client.fields.map(f=>`<td>${tots[f]}</td>`).join('')}<td>${edrT!==null?edrT+'%':'—'}</td></tr>`;
   html+=`</tbody></table></body></html>`;
   const w=window.open('','_blank');w.document.write(html);w.document.close();w.print();
 };
@@ -665,151 +748,139 @@ window._exportEntPDF=()=>{
 // ── HISTÓRICO ──────────────────────────────────────────
 async function renderHistorico(){
   document.getElementById('topbar-actions').innerHTML='';
-  document.getElementById('content').innerHTML='<div class="card"><div style="padding:20px;text-align:center;color:#666">A carregar histórico...</div></div>';
-  try {
-    const q=query(collection(db,'audit_log'),orderBy('ts','desc'),limit(200));
-    const snap=await getDocs(q);
-    const logs=[];
-    snap.forEach(d=>logs.push(d.data()));
+  document.getElementById('content').innerHTML='<div class="card"><div style="padding:20px;text-align:center;color:#666">A carregar...</div></div>';
+  try{
+    const q=query(collection(db,'audit_log'),orderBy('ts','desc'),limit(300));
+    const snap=await getDocs(q);const logs=[];snap.forEach(d=>logs.push(d.data()));
     document.getElementById('content').innerHTML=`<div class="card">
       <div class="card-header"><span class="card-title">Histórico de Edições</span><span style="font-size:12px;color:#5f6368">Últimas ${logs.length} ações</span></div>
       <div class="tbl-wrap"><table>
         <thead><tr><th>Data/Hora</th><th>Utilizador</th><th>Ação</th><th>Detalhes</th></tr></thead>
         <tbody>${logs.length?logs.map(l=>{
           const dt=new Date(l.ts);
-          const dtStr=dt.toLocaleDateString('pt-PT')+' '+dt.toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'});
-          return `<tr><td style="white-space:nowrap">${dtStr}</td><td><strong>${l.user}</strong></td><td><span class="badge badge-ok" style="font-size:11px">${l.action}</span></td><td style="font-size:12px">${l.details}</td></tr>`;
-        }).join(''):'<tr><td colspan="4" style="text-align:center;color:#666;padding:20px">Nenhuma ação registada ainda.</td></tr>'}</tbody>
+          return `<tr><td style="white-space:nowrap;font-size:12px">${dt.toLocaleDateString('pt-PT')} ${dt.toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'})}</td>
+            <td><strong>${l.user}</strong></td>
+            <td><span class="badge badge-ok" style="font-size:11px">${l.action}</span></td>
+            <td style="font-size:12px">${l.details}</td></tr>`;
+        }).join(''):'<tr><td colspan="4" style="text-align:center;color:#666;padding:20px">Sem registos ainda.</td></tr>'}</tbody>
       </table></div>
     </div>`;
-  } catch(e){
-    document.getElementById('content').innerHTML='<div class="card" style="padding:40px;text-align:center;color:#c5221f">Erro ao carregar histórico.</div>';
-  }
+  }catch(e){document.getElementById('content').innerHTML='<div class="card" style="padding:40px;text-align:center;color:#c5221f">Erro ao carregar histórico.</div>';}
 }
 
 // ── MODAL ──────────────────────────────────────────────
 window._closeModal=()=>document.getElementById('modal-overlay').classList.add('hidden');
 
 // ── AUTH ───────────────────────────────────────────────
-function showLogin(){document.getElementById('app').classList.add('hidden');document.getElementById('login-screen').classList.remove('hidden');}
-function showApp(){document.getElementById('login-screen').classList.add('hidden');document.getElementById('app').classList.remove('hidden');loadAllData();}
-
 window._doLogin=async()=>{
-  const email=document.getElementById('login-email').value.trim();
-  const pass=document.getElementById('login-pass').value;
+  const email=document.getElementById('login-email').value.trim(),pass=document.getElementById('login-pass').value;
   document.getElementById('login-err').textContent='';
-  try { await signInWithEmailAndPassword(auth,email,pass); }
-  catch(e){ document.getElementById('login-err').textContent='Email ou password incorretos.'; }
+  try{await signInWithEmailAndPassword(auth,email,pass);}
+  catch(e){document.getElementById('login-err').textContent='Email ou password incorretos.';}
 };
-window._doLogout=async()=>{await signOut(auth);};
+window._doLogout=async()=>await signOut(auth);
 
 onAuthStateChanged(auth,user=>{
-  if(user){
-    currentUser=user;
-    document.getElementById('user-email').textContent=user.email;
-    showApp();
-  } else {
-    currentUser=null;
-    showLogin();
-  }
+  if(user){currentUser=user;document.getElementById('user-email').textContent=user.email;
+    document.getElementById('login-screen').classList.add('hidden');document.getElementById('app').classList.remove('hidden');loadAllData();}
+  else{currentUser=null;document.getElementById('app').classList.add('hidden');document.getElementById('login-screen').classList.remove('hidden');}
 });
 </script>
 
 <style>
-  :root{--primary:#1a73e8;--primary-dark:#1557b0;--success:#34a853;--danger:#ea4335;--bg:#f0f4f8;--card:#fff;--text:#202124;--text-light:#5f6368;--border:#dadce0;}
-  *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);}
-  #login-screen{display:flex;align-items:center;justify-content:center;height:100vh;background:linear-gradient(135deg,#1e2a3a,#1a73e8);}
-  .login-box{background:#fff;border-radius:20px;padding:40px;width:360px;box-shadow:0 16px 48px rgba(0,0,0,.2);text-align:center;}
-  .login-box .logo{font-size:32px;margin-bottom:8px;}
-  .login-box h2{font-size:20px;font-weight:700;margin-bottom:4px;}
-  .login-box p{font-size:13px;color:var(--text-light);margin-bottom:24px;}
-  .login-box input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:12px;}
-  .login-box input:focus{border-color:var(--primary);outline:none;}
-  .login-box button{width:100%;padding:12px;background:var(--primary);color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
-  .login-box button:hover{background:var(--primary-dark);}
-  #login-err{color:var(--danger);font-size:13px;margin-top:8px;}
-  #app{display:flex;height:100vh;overflow:hidden;}
-  #sidebar{width:220px;background:#1e2a3a;color:#fff;display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto;}
-  #sidebar .logo{padding:20px 16px;font-size:15px;font-weight:700;border-bottom:1px solid #2d3f54;display:flex;align-items:center;gap:8px;}
-  #sidebar .logo span{font-size:22px;}
-  .nav-section{padding:12px 16px 4px;font-size:10px;text-transform:uppercase;color:#7a8fa6;letter-spacing:1px;}
-  .nav-item{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;font-size:13px;color:#b0bec5;transition:all .2s;}
-  .nav-item:hover,.nav-item.active{background:#2d3f54;color:#fff;}
-  .nav-item .icon{font-size:16px;width:20px;text-align:center;}
-  .sidebar-bottom{margin-top:auto;padding:16px;border-top:1px solid #2d3f54;}
-  .sidebar-bottom small{display:block;font-size:11px;color:#7a8fa6;margin-bottom:8px;word-break:break-all;}
-  .sidebar-bottom button{width:100%;padding:7px;background:#ea4335;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;}
-  #main{flex:1;display:flex;flex-direction:column;overflow:hidden;}
-  #topbar{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
-  #topbar h1{font-size:18px;font-weight:600;}
-  #topbar .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-  #content{flex:1;overflow-y:auto;padding:24px;}
-  .card{background:var(--card);border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px;}
-  .card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;}
-  .card-title{font-size:15px;font-weight:600;}
-  .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:6px;transition:all .2s;}
-  .btn-primary{background:var(--primary);color:#fff;}.btn-primary:hover{background:var(--primary-dark);}
-  .btn-success{background:var(--success);color:#fff;}
-  .btn-danger{background:var(--danger);color:#fff;}
-  .btn-outline{background:transparent;border:1px solid var(--border);color:var(--text);}.btn-outline:hover{background:var(--bg);}
-  .btn-sm{padding:5px 10px;font-size:12px;}
-  .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:24px;}
-  .stat-card{background:var(--card);border-radius:12px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
-  .stat-card .label{font-size:12px;color:var(--text-light);margin-bottom:6px;}
-  .stat-card .value{font-size:26px;font-weight:700;}
-  .stat-card.blue .value{color:var(--primary);}.stat-card.green .value{color:var(--success);}
-  .stat-card.red .value{color:var(--danger);}.stat-card.orange .value{color:#f57c00;}
-  .tbl-wrap{overflow-x:auto;}
-  table{width:100%;border-collapse:collapse;font-size:13px;}
-  th{background:#f8f9fa;padding:10px 12px;text-align:left;font-weight:600;border-bottom:2px solid var(--border);white-space:nowrap;}
-  td{padding:8px 12px;border-bottom:1px solid #f0f0f0;}
-  tr:hover td{background:#f8f9fa;}
-  .badge{display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;}
-  .badge-ok{background:#e6f4ea;color:#137333;}.badge-falta{background:#fce8e6;color:#c5221f;}
-  .presence-grid{overflow-x:auto;}
-  .presence-table{border-collapse:collapse;min-width:100%;}
-  .presence-table th,.presence-table td{border:1px solid var(--border);padding:4px 6px;text-align:center;font-size:11px;white-space:nowrap;}
-  .presence-table th{background:#1e2a3a;color:#fff;}
-  .presence-table td.day-info{background:#f8f9fa;font-weight:600;}
-  .presence-table td.weekend{background:#fffde7;}
-  select.status-select{border:none;background:transparent;font-size:11px;width:105px;cursor:pointer;font-weight:600;}
-  .status-ok{background:#e6f4ea!important;color:#137333;}
-  .status-falta{background:#fce8e6!important;color:#c5221f;}
-  .status-formacao{background:#e8f0fe!important;color:#1a73e8;}
-  .status-backup{background:#fef7e0!important;color:#b45309;}
-  .status-bext{background:#f3e8ff!important;color:#7b2d8b;}
-  .status-bint{background:#fff3e0!important;color:#e65100;}
-  .status-empty{background:#f8f8f8!important;color:#999;}
-  .leg-ok{background:#e6f4ea;color:#137333;padding:3px 8px;border-radius:10px;}
-  .leg-falta{background:#fce8e6;color:#c5221f;padding:3px 8px;border-radius:10px;}
-  .leg-form{background:#e8f0fe;color:#1a73e8;padding:3px 8px;border-radius:10px;}
-  .leg-back{background:#fef7e0;color:#b45309;padding:3px 8px;border-radius:10px;}
-  .leg-bext{background:#f3e8ff;color:#7b2d8b;padding:3px 8px;border-radius:10px;}
-  .leg-bint{background:#fff3e0;color:#e65100;padding:3px 8px;border-radius:10px;}
-  .delivery-input{width:60px;border:1px solid transparent;background:transparent;text-align:center;padding:2px;font-size:12px;border-radius:4px;}
-  .delivery-input:focus{border-color:var(--primary);outline:none;background:#fff;}
-  .edr-cell{font-weight:700;}
-  .edr-high{color:#137333;}.edr-mid{color:#f57c00;}.edr-low{color:#c5221f;}
-  .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;}
-  .form-group{display:flex;flex-direction:column;gap:6px;}
-  .form-group label{font-size:12px;font-weight:600;color:var(--text-light);}
-  .form-group input,.form-group select{padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;}
-  .form-group input:focus,.form-group select:focus{border-color:var(--primary);outline:none;}
-  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;display:flex;align-items:center;justify-content:center;}
-  .modal{background:#fff;border-radius:16px;padding:28px;width:580px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);}
-  .modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;}
-  .modal-title{font-size:16px;font-weight:700;}
-  .modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-light);}
-  .modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:24px;}
-  .pill{padding:6px 14px;border-radius:20px;border:1px solid var(--border);font-size:12px;cursor:pointer;transition:all .2s;}
-  .pill.active{background:var(--primary);color:#fff;border-color:var(--primary);}
-  .month-nav{display:flex;align-items:center;gap:8px;}
-  .month-nav button{background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:14px;}
-  .month-nav span{font-weight:600;font-size:14px;min-width:130px;text-align:center;}
-  .fields-check{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;}
-  .fields-check label{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;}
-  .hidden{display:none!important;}
+:root{--primary:#1a73e8;--primary-dark:#1557b0;--success:#34a853;--danger:#ea4335;--bg:#f0f4f8;--card:#fff;--text:#202124;--text-light:#5f6368;--border:#dadce0;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);}
+#login-screen{display:flex;align-items:center;justify-content:center;height:100vh;background:linear-gradient(135deg,#1e2a3a,#1a73e8);}
+.login-box{background:#fff;border-radius:20px;padding:40px;width:360px;box-shadow:0 16px 48px rgba(0,0,0,.2);text-align:center;}
+.login-box .logo{font-size:32px;margin-bottom:8px;}
+.login-box h2{font-size:20px;font-weight:700;margin-bottom:4px;}
+.login-box p{font-size:13px;color:var(--text-light);margin-bottom:24px;}
+.login-box input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:12px;}
+.login-box input:focus{border-color:var(--primary);outline:none;}
+.login-box button{width:100%;padding:12px;background:var(--primary);color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+.login-box button:hover{background:var(--primary-dark);}
+#login-err{color:var(--danger);font-size:13px;margin-top:8px;}
+#app{display:flex;height:100vh;overflow:hidden;}
+#sidebar{width:220px;background:#1e2a3a;color:#fff;display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto;}
+#sidebar .logo{padding:20px 16px;font-size:15px;font-weight:700;border-bottom:1px solid #2d3f54;display:flex;align-items:center;gap:8px;}
+#sidebar .logo span{font-size:22px;}
+.nav-section{padding:12px 16px 4px;font-size:10px;text-transform:uppercase;color:#7a8fa6;letter-spacing:1px;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;font-size:13px;color:#b0bec5;transition:all .2s;}
+.nav-item:hover,.nav-item.active{background:#2d3f54;color:#fff;}
+.nav-item .icon{font-size:16px;width:20px;text-align:center;}
+.sidebar-bottom{margin-top:auto;padding:16px;border-top:1px solid #2d3f54;}
+.sidebar-bottom small{display:block;font-size:11px;color:#7a8fa6;margin-bottom:8px;word-break:break-all;}
+.sidebar-bottom button{width:100%;padding:7px;background:#ea4335;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;}
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+#topbar{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+#topbar h1{font-size:18px;font-weight:600;}
+#topbar .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+#content{flex:1;overflow-y:auto;padding:24px;}
+.card{background:var(--card);border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px;}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;}
+.card-title{font-size:15px;font-weight:600;}
+.btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:6px;transition:all .2s;}
+.btn-primary{background:var(--primary);color:#fff;}.btn-primary:hover{background:var(--primary-dark);}
+.btn-success{background:var(--success);color:#fff;}
+.btn-danger{background:var(--danger);color:#fff;}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text);}.btn-outline:hover{background:var(--bg);}
+.btn-sm{padding:5px 10px;font-size:12px;}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;margin-bottom:24px;}
+.stat-card{background:var(--card);border-radius:12px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
+.stat-card .label{font-size:12px;color:var(--text-light);margin-bottom:6px;}
+.stat-card .value{font-size:26px;font-weight:700;}
+.stat-card.blue .value{color:var(--primary);}.stat-card.green .value{color:var(--success);}
+.stat-card.red .value{color:var(--danger);}.stat-card.orange .value{color:#f57c00;}
+.tbl-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th{background:#f8f9fa;padding:10px 12px;text-align:left;font-weight:600;border-bottom:2px solid var(--border);white-space:nowrap;}
+td{padding:8px 12px;border-bottom:1px solid #f0f0f0;}
+tr:hover td{background:rgba(0,0,0,.02);}
+.badge{display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;}
+.badge-ok{background:#e6f4ea;color:#137333;}.badge-falta{background:#fce8e6;color:#c5221f;}
+.presence-grid{overflow-x:auto;}
+.presence-table{border-collapse:collapse;min-width:100%;}
+.presence-table th,.presence-table td{border:1px solid var(--border);padding:3px 5px;text-align:center;font-size:11px;white-space:nowrap;}
+.presence-table th{background:#1e2a3a;color:#fff;}
+.presence-table td.day-info{font-weight:600;}
+select.status-select{border:none;background:transparent;font-size:11px;width:105px;cursor:pointer;font-weight:600;}
+.status-ok{background:#e6f4ea!important;color:#137333;}
+.status-falta{background:#fce8e6!important;color:#c5221f;}
+.status-formacao{background:#e8f0fe!important;color:#1a73e8;}
+.status-backup{background:#fef7e0!important;color:#b45309;}
+.status-bext{background:#f3e8ff!important;color:#7b2d8b;}
+.status-bint{background:#fff3e0!important;color:#e65100;}
+.status-folga{background:#e0f7fa!important;color:#00695c;}
+.status-empty{background:#f8f8f8!important;color:#999;}
+.leg{padding:3px 7px;border-radius:10px;font-size:11px;}
+.leg-ok{background:#e6f4ea;color:#137333;}.leg-falta{background:#fce8e6;color:#c5221f;}
+.leg-form{background:#e8f0fe;color:#1a73e8;}.leg-back{background:#fef7e0;color:#b45309;}
+.leg-bext{background:#f3e8ff;color:#7b2d8b;}.leg-bint{background:#fff3e0;color:#e65100;}
+.leg-folga{background:#e0f7fa;color:#00695c;}
+.delivery-input{width:58px;border:1px solid transparent;background:transparent;text-align:center;padding:2px;font-size:12px;border-radius:4px;}
+.delivery-input:focus{border-color:var(--primary);outline:none;background:#fff;}
+.edr-cell{font-weight:700;}
+.edr-high{color:#137333;}.edr-mid{color:#f57c00;}.edr-low{color:#c5221f;}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;}
+.form-group{display:flex;flex-direction:column;gap:6px;}
+.form-group label{font-size:12px;font-weight:600;color:var(--text-light);}
+.form-group input,.form-group select{padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;}
+.form-group input:focus,.form-group select:focus{border-color:var(--primary);outline:none;}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;display:flex;align-items:center;justify-content:center;}
+.modal{background:#fff;border-radius:16px;padding:28px;width:600px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;}
+.modal-title{font-size:16px;font-weight:700;}
+.modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-light);}
+.modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:24px;}
+.pill{padding:6px 14px;border-radius:20px;border:1px solid var(--border);font-size:12px;cursor:pointer;transition:all .2s;}
+.pill.active{background:var(--primary);color:#fff;border-color:var(--primary);}
+.month-nav{display:flex;align-items:center;gap:8px;}
+.month-nav button{background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:14px;}
+.month-nav span{font-weight:600;font-size:14px;min-width:130px;text-align:center;}
+.fields-check{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;}
+.fields-check label{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;}
+.hidden{display:none!important;}
 </style>
 </head>
 <body>
