@@ -424,28 +424,57 @@ function renderEntregas(){
   const mots=state.motoristas.filter(mo=>mo.client===client.id&&mo.active!==false);
   const hasSubs=client.subcategories&&client.subcategories.length>0;
 
+  // If no motoristas assigned to client, show message
+  if(!mots.length){
+    document.getElementById('content').innerHTML=html+`<div class="card" style="padding:40px;text-align:center;color:#666">
+      Nenhum motorista ativo associado a este cliente.<br><br>
+      <button class="btn btn-primary" onclick="window._showPage('motoristas')">👤 Ir para Motoristas</button>
+    </div>`;
+    return;
+  }
+
   // Group motoristas by subcategory if applicable
   const groups=hasSubs
-    ? client.subcategories.map(sub=>({label:sub.name,id:sub.id,mots:mots.filter(mo=>mo.subcat===sub.id)}))
+    ? client.subcategories.map(sub=>({label:sub.name,id:sub.id,mots:mots.filter(mo=>mo.subcat===sub.id)})).filter(g=>g.mots.length>0)
     : [{label:'',id:null,mots}];
 
+  // Fallback: if subcategories exist but no motoristas matched, show all
+  if(groups.length===0) groups.push({label:'',id:null,mots});
+
   // Build header
-  let headerHTML='<th>Dia</th>';
+  let headerHTML='<th style="min-width:80px">Dia</th>';
   groups.forEach(g=>{
-    g.mots.forEach(mo=>{
-      fields.forEach(f=>{
-        headerHTML+=`<th style="background:${hc}">${mo.name}<br><small style="font-weight:400">${f}</small></th>`;
+    if(hasSubs && g.label){
+      // subcategory group header spanning all its columns
+      const colSpan = g.mots.length * fields.length + (g.mots.length>1?fields.length:0) + (client.showEDR?1:0);
+      headerHTML+=`<th colspan="${colSpan}" style="background:${lighten(clientColor,0.3)};text-align:center;border-left:2px solid ${clientColor}">${g.label}</th>`;
+    } else {
+      g.mots.forEach(mo=>{
+        fields.forEach(f=>{
+          headerHTML+=`<th style="background:${hc}">${mo.name}<br><small style="font-weight:400;font-size:10px">${f}</small></th>`;
+        });
       });
-    });
-    if(g.mots.length>1||hasSubs){
-      fields.forEach(f=>headerHTML+=`<th style="background:${lighten(clientColor,0.2)}">${g.label||'Total'}<br><small style="font-weight:400">${f}</small></th>`);
+      if(g.mots.length>1) fields.forEach(f=>headerHTML+=`<th style="background:${lighten(clientColor,0.2)}">Total<br><small style="font-size:10px">${f}</small></th>`);
+      if(client.showEDR) headerHTML+=`<th style="background:${lighten(clientColor,0.2)}">EDR%</th>`;
     }
-    if(client.showEDR&&g.mots.length>0) headerHTML+=`<th style="background:${lighten(clientColor,0.2)}">EDR%${g.label?`<br><small>${g.label}</small>`:''}</th>`;
   });
   if(hasSubs){
-    // Grand total columns
-    fields.forEach(f=>headerHTML+=`<th style="background:${clientColor}">Total<br><small>${f}</small></th>`);
-    if(client.showEDR) headerHTML+=`<th style="background:${clientColor}">EDR% Total</th>`;
+    fields.forEach(f=>headerHTML+=`<th style="background:${clientColor};border-left:2px solid #aaa">TOTAL<br><small style="font-size:10px">${f}</small></th>`);
+    if(client.showEDR) headerHTML+=`<th style="background:${clientColor}">EDR%<br><small>Total</small></th>`;
+  }
+
+  // Second header row for subcategory detail
+  let header2HTML='<th></th>';
+  if(hasSubs){
+    groups.forEach(g=>{
+      g.mots.forEach(mo=>{
+        fields.forEach(f=>header2HTML+=`<th style="background:${hc};font-size:10px;border-left:1px solid ${clientColor}">${mo.name}<br><small style="font-weight:400">${f}</small></th>`);
+      });
+      if(g.mots.length>1) fields.forEach(f=>header2HTML+=`<th style="background:${lighten(clientColor,0.25)};font-size:10px">Sub-Total<br>${f}</th>`);
+      if(client.showEDR) header2HTML+=`<th style="background:${lighten(clientColor,0.25)};font-size:10px">EDR%</th>`;
+    });
+    fields.forEach(f=>header2HTML+=`<th style="background:${clientColor};font-size:10px;border-left:2px solid #aaa">${f}</th>`);
+    if(client.showEDR) header2HTML+=`<th style="background:${clientColor};font-size:10px">EDR%</th>`;
   }
 
   html+=`<div class="card" style="border-top:4px solid ${clientColor}">
@@ -454,7 +483,10 @@ function renderEntregas(){
       <span style="font-size:12px;color:#444">${mots.map(m=>m.name).join(' · ')}</span>
     </div>
     <div class="tbl-wrap"><table>
-      <thead><tr>${headerHTML}</tr></thead><tbody>`;
+      <thead>
+        <tr>${headerHTML}</tr>
+        ${hasSubs?`<tr>${header2HTML}</tr>`:''}
+      </thead><tbody>`;
 
   // Accumulate totals per group and grand
   const groupTotals=groups.map(()=>{ const t={};fields.forEach(f=>t[f]=0);return t; });
