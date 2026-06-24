@@ -424,22 +424,16 @@ function renderEntregas(){
   const mots=state.motoristas.filter(mo=>mo.client===client.id&&mo.active!==false);
   const hasSubs=client.subcategories&&client.subcategories.length>0;
 
-  // If no motoristas assigned to client, show message
-  if(!mots.length){
-    document.getElementById('content').innerHTML=html+`<div class="card" style="padding:40px;text-align:center;color:#666">
-      Nenhum motorista ativo associado a este cliente.<br><br>
-      <button class="btn btn-primary" onclick="window._showPage('motoristas')">👤 Ir para Motoristas</button>
-    </div>`;
-    return;
-  }
+  // If no motoristas, use a virtual "generic" motorista with id=0
+  const effectiveMots = mots.length > 0 ? mots : [{id:0, name:'—', client:client.id, subcat:null, active:true, dualShift:false}];
 
-  // Group motoristas by subcategory if applicable
-  const groups=hasSubs
-    ? client.subcategories.map(sub=>({label:sub.name,id:sub.id,mots:mots.filter(mo=>mo.subcat===sub.id)})).filter(g=>g.mots.length>0)
-    : [{label:'',id:null,mots}];
+  // Group by subcategory if applicable
+  const groups = hasSubs
+    ? client.subcategories.map(sub=>({label:sub.name, id:sub.id, mots:effectiveMots.filter(mo=>mo.subcat===sub.id)})).filter(g=>g.mots.length>0)
+    : [{label:'', id:null, mots:effectiveMots}];
 
-  // Fallback: if subcategories exist but no motoristas matched, show all
-  if(groups.length===0) groups.push({label:'',id:null,mots});
+  // Fallback: if subcategories exist but no motoristas matched, show all as single group
+  if(groups.length===0) groups.push({label:'', id:null, mots:effectiveMots});
 
   // Build header
   let headerHTML='<th style="min-width:80px">Dia</th>';
